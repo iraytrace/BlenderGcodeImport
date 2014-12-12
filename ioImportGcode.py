@@ -18,7 +18,11 @@
 
 ## blendish python ripped from fro io_import_dxf
 
-import bpy 
+import string
+import os
+import bpy
+import mathutils
+import math
 
 bl_info = {
     'name': 'Import Slic3r GCode',
@@ -34,31 +38,6 @@ bl_info = {
 
 __version__ = '.'.join([str(s) for s in bl_info['version']])
 
-# gcode parser for blender 2.5 
-# Simon Kirkby
-# 201102051305
-# tigger@interthingy.com 
-
-#modified by David Anderson to handle Skeinforge comments
-# Thanks Simon!!!
-
-# modified by Alessandro Ranellucci (2011-10-14)
-# to make it compatible with Blender 2.59
-# and with modern 5D GCODE
-
-# Modified by Winter Guerra (XtremD) on February 16th, 2012
-# to make the script compatable with stock Makerbot GCode files
-# and grab all nozzle extrusion information from Skeinforge's machine output
-# WARNING: This script no longer works with stock 5D GCode! (Can somebody please integrate the two versions together?)
-
-# A big shout-out goes to my friend Jon Spyreas for helping me block-out the maths needed in the "addArc" subroutine
-# Thanks a million dude!
-# Github branch link: https://github.com/xtremd/blender-gcode-reader
-
-import string,os
-import bpy
-import mathutils
-import math
 
 class IMPORT_OT_gcode(bpy.types.Operator):
     '''Imports Reprap FDM gcode'''
@@ -72,8 +51,9 @@ class IMPORT_OT_gcode(bpy.types.Operator):
 
     def __init__(self):
         self.points = []
-        self.pos = {'X':10.0, 'Y':20.0, 'Z':30.0}
+        self.pos = {'X':10.0, 'Y':20.0, 'Z':30.0, 'E':0.0}
         self.toolState = True
+        self.currentLayer = 0
 
     ##### DRAW #####
     def draw(self, context):
@@ -96,6 +76,12 @@ class IMPORT_OT_gcode(bpy.types.Operator):
     ##### PARSE #####
     def parse(self, fileName):
         self.points = []
+        self.currentLayer = 0
+
+        # get the object/curve names from the filename
+        self.obName = self.filepath.split(os.sep)[-1]
+        self.obName = self.obName.replace(".gcode", "")
+
         f = open(fileName)
         for line in f.readlines():
             # remove comments and leading/trailing whitespace
@@ -110,15 +96,38 @@ class IMPORT_OT_gcode(bpy.types.Operator):
 
             self.dispatch(tokens)
             f.close()
+        self.genLayer()
 
+    def genProfile(self, profileName):
+        # create profile object since it does not exist
+        # this should probably be a polyline to save drawing time
         bpy.ops.curve.primitive_bezier_circle_add()
         cir = bpy.data.objects["BezierCircle"]
         bpy.ops.transform.resize( value=[.3, .3, .3] )
+        cir.name = profileName
+        cir.data.name = profileName + '_curve'
 
-        curveData = bpy.data.curves.new(fileName, type='CURVE')
+    def genLayer(self):
+
+        if len(self.points) == 0:
+            return
+
+        # generate a profile if needed
+        # check to see if profile exists
+        profileName = self.obName + "Profile"
+        print('looking for<' + profileName + '> in:')
+        print(bpy.data.objects.keys)
+        if profileName not in bpy.data.objects.keys():
+            self.genProfile(profileName)
+
+        cir = bpy.data.objects[profileName]
+
+        self.currentLayer = self.currentLayer + 1
+
+        # Create a Blender curve for this layer of the 3d print
+        layerName = self.obName + "_curve_ %03d" % self.currentLayer
+        curveData = bpy.data.curves.new(layerName, type='CURVE')
         curveData.dimensions = '3D'
-
-
         curveData.bevel_object = cir
 
         polyline = curveData.splines.new('POLY')
@@ -128,13 +137,15 @@ class IMPORT_OT_gcode(bpy.types.Operator):
             x,y,z = coord
             polyline.points[i].co = (x, y, z, 1)
 
-        # create object
-        curveOB = bpy.data.objects.new('toolpath', curveData)
+        # clear out the points we have now used
+        self.points = []
+
+        # create object to hold the curve
+        curveOB = bpy.data.objects.new(layerName, curveData)
         scn = bpy.context.scene
         scn.objects.link(curveOB)
         scn.objects.active = curveOB
         curveOB.select = True
-
 
     ##### DISPATCH #####
     def dispatch(self, tokens):
@@ -151,20 +162,23 @@ class IMPORT_OT_gcode(bpy.types.Operator):
     def parseCoords(self, tokens):
         for tok in tokens:
             axis = tok[0]
-            if axis in ['X', 'Y', 'Z']:
+            if axis in ['X', 'Y', 'Z', 'E']:
                 self.pos[axis] = float(tok[1:])
 
     def G0(self, tokens):
         '''move fast'''
+        oldExtrude = self.pos['E']
+
         self.parseCoords(tokens)
+        if self.pos['E'] <= oldExtrude:
+            self.genLayer()
+
         self.points.append([self.pos['X'], self.pos['Y'], self.pos['Z']])
-        pass
+
 
     def G1(self, tokens):
         '''move to'''
-        self.parseCoords(tokens)
-        self.points.append([self.pos['X'], self.pos['Y'], self.pos['Z']])
-        pass
+        self.G0(tokens)
 
     def G21(self,tokens):
         '''set units mm'''
@@ -172,7 +186,9 @@ class IMPORT_OT_gcode(bpy.types.Operator):
 
     def G28(self, tokens):
         '''move to origin'''
-        self.pos = {'X':0.0, 'Y':0.0, 'Z':0.0}
+        self.pos['X'] = 0.0
+        self.pos['Y'] = 0.0
+        self.pos['Z'] = 0.0
         pass
 
     def G90(self, tokens):
@@ -181,7 +197,11 @@ class IMPORT_OT_gcode(bpy.types.Operator):
 
     def G92(self, tokens):
         '''set position'''
-        pass
+        oldExtrude = self.pos['E']
+
+        self.parseCoords(tokens)
+        if self.pos['E'] < oldExtrude:
+                self.genLayer()
 
     def M82(self, tokens):
         '''set extruder absolute mode'''
@@ -215,12 +235,10 @@ def menu_func(self, context):
 def register():
     bpy.utils.register_module(__name__)
     bpy.types.INFO_MT_file_import.append(menu_func)
-    print( 'register')
 
 def unregister():
     bpy.utils.unregister_module(__name__)
     bpy.types.INFO_MT_file_import.remove(menu_func)
-    print( 'unregister')
 
 if __name__ == "__main__":
     register()
