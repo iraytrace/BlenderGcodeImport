@@ -23,6 +23,7 @@ import os
 import bpy
 import mathutils
 import math
+import copy
 
 bl_info = {
     'name': 'Import Slic3r GCode',
@@ -50,10 +51,25 @@ class IMPORT_OT_gcode(bpy.types.Operator):
     filepath = bpy.props.StringProperty(name="File Path", description="Filepath used for importing the GCode file", maxlen= 1024, default= "")
 
     def __init__(self):
+        # current tool position
+        self.pos = {'X':0.0, 'Y':0.0, 'Z':0.0, 'E':0.0}
+
+        # set of accumulated points on current extrusion path
+        # a set of points makes up a polyline
         self.points = []
-        self.pos = {'X':10.0, 'Y':20.0, 'Z':30.0, 'E':0.0}
-        self.toolState = True
-        self.currentLayer = 0
+
+        # set of polylines 
+        self.polys = []
+
+        # each layer is a set of polylines at a constant Z
+        self.layers = []
+
+        # set of Z elevation changes.  Most common is layer height
+        self.thickness = { }
+        
+        self.ySquash = 0.5
+        self.xOoze = 1.65
+
 
     ##### DRAW #####
     def draw(self, context):
@@ -63,7 +79,6 @@ class IMPORT_OT_gcode(bpy.types.Operator):
     def execute(self, context):
         print('execute')
         self.parse(self.filepath)
-        # import_gcode(self.filepath)
         return {'FINISHED'}
 
     ##### INVOKE  #####
@@ -76,10 +91,10 @@ class IMPORT_OT_gcode(bpy.types.Operator):
     ##### PARSE #####
     def parse(self, fileName):
         self.points = []
-        self.currentLayer = 0
 
+        #print ('---------- read ' + fileName + ' ------------')
         # get the object/curve names from the filename
-        self.obName = self.filepath.split(os.sep)[-1]
+        self.obName = fileName.split(os.sep)[-1]
         self.obName = self.obName.replace(".gcode", "")
 
         f = open(fileName)
@@ -95,58 +110,80 @@ class IMPORT_OT_gcode(bpy.types.Operator):
             tokens = line.split()
 
             self.dispatch(tokens)
-            f.close()
-        self.genLayer()
+        f.close()
+        self.newLayer(-1.0)
+        
+        #print ('---------- build ------------')
+        #print (' %d slices' % len(self.layers) )
+        #print (' deltaZ values:')
+        count = 0
+        radius = 0
+        # find the most common inter-layer distance
+        for key in sorted(self.thickness.keys()):
+               #print( '  %s : %d' % (key,self.thickness[key]) )
+               if self.thickness[key] > count:
+                   count = self.thickness[key]
+                   radius = key
 
-    def genProfile(self, profileName):
-        # create profile object since it does not exist
-        # this should probably be a polyline to save drawing time
-        bpy.ops.curve.primitive_bezier_circle_add()
-        cir = bpy.data.objects["BezierCircle"]
-        bpy.ops.transform.resize( value=[.3, .3, .3] )
-        cir.name = profileName
-        cir.data.name = profileName + '_curve'
 
-    def genLayer(self):
+        profileName = self.obName + '_profile'
+        profileData = bpy.data.curves.new(profileName, type='CURVE')
+        profileData.dimensions = '3D'
 
-        if len(self.points) == 0:
-            return
+        profilePoly = profileData.splines.new('POLY')
+        profilePoly.points.add(7)
+        angRad = radius * 0.70711
+        profilePoly.points[7].co = (radius * self.xOoze,  0.0,                 0.0, 1)
+        profilePoly.points[6].co = (angRad* self.xOoze,  angRad* self.ySquash, 0.0, 1)
+        profilePoly.points[5].co = (0.0,                 radius* self.ySquash, 0.0, 1)
+        profilePoly.points[4].co = (-angRad* self.xOoze,  angRad* self.ySquash, 0.0, 1)
+        profilePoly.points[3].co = (-radius* self.xOoze,  0.0,                  0.0, 1)
+        profilePoly.points[2].co = (-angRad* self.xOoze,  -angRad* self.ySquash, 0.0, 1)
+        profilePoly.points[1].co = (0.0,                  -radius* self.ySquash, 0.0, 1)
+        profilePoly.points[0].co = (angRad* self.xOoze,  -angRad* self.ySquash, 0.0, 1)
+        profilePoly.use_cyclic_u = True
+        #print (dir(profilePoly))
+        profileObject = bpy.data.objects.new(profileName, profileData)
 
-        # generate a profile if needed
-        # check to see if profile exists
-        profileName = self.obName + "Profile"
-        print('looking for<' + profileName + '> in:')
-        print(bpy.data.objects.keys)
-        if profileName not in bpy.data.objects.keys():
-            self.genProfile(profileName)
-
-        cir = bpy.data.objects[profileName]
-
-        self.currentLayer = self.currentLayer + 1
-
-        # Create a Blender curve for this layer of the 3d print
-        layerName = self.obName + "_curve_ %03d" % self.currentLayer
-        curveData = bpy.data.curves.new(layerName, type='CURVE')
-        curveData.dimensions = '3D'
-        curveData.bevel_object = cir
-
-        polyline = curveData.splines.new('POLY')
-        polyline.points.add(len(self.points)-1)
-
-        for i, coord in enumerate(self.points):
-            x,y,z = coord
-            polyline.points[i].co = (x, y, z, 1)
-
-        # clear out the points we have now used
-        self.points = []
-
-        # create object to hold the curve
-        curveOB = bpy.data.objects.new(layerName, curveData)
         scn = bpy.context.scene
-        scn.objects.link(curveOB)
-        scn.objects.active = curveOB
-        curveOB.select = True
+        scn.objects.link(profileObject)
+        scn.objects.active = profileObject
 
+
+        for layerNum,layer in enumerate(self.layers):
+
+            layerName = self.obName + '_slice_%d' % layerNum
+            curveData = bpy.data.curves.new(layerName, type='CURVE')
+            curveData.dimensions = '3D'
+            curveData.bevel_object = profileObject
+            #print (layerName + ':')
+
+            for poly in layer:
+                pointNum = 0
+                for point in poly:
+                    if pointNum == 0:
+                        x,y,z = point
+                        oldPt = mathutils.Vector((x, y, z, 1))
+                        pointNum = 1
+                    else:
+                        polyline = curveData.splines.new('POLY')
+                        polyline.points.add(1)
+
+                        x,y,z = point
+                        newPt = mathutils.Vector((x, y, z, 1))
+                        polyline.points[0].co = oldPt
+                        polyline.points[1].co = newPt
+                        oldPt = newPt
+            layerObject = bpy.data.objects.new(layerName, curveData)
+            scn.objects.link(layerObject)
+            scn.objects.active = layerObject
+
+
+        # print('-------------- done -------------')
+
+
+   
+   
     ##### DISPATCH #####
     def dispatch(self, tokens):
         if tokens[0] in dir(self):
@@ -154,27 +191,85 @@ class IMPORT_OT_gcode(bpy.types.Operator):
         else:
             print( 'unknown command:' + str(tokens[0]))
 
+    ##### newPoly #####
+    def newPoly(self):
+        # stash points into curves
+        # need to make this a copy
+        if len(self.points) > 0:
+            #print( 'poly with %d points' % (len(self.points)) )
+            #for i,p in enumerate(self.points):
+            #    print( '\t %d %s' % (i, str(p)) )
+            self.polys.append( self.points[:] )
+            self.points = []
+    
+    ##### newLayer #####
+    def newLayer(self, delta):
+        # stash existing points into curve
+        self.newPoly()
+
+        # stash existing set of polys into layer
+        if len(self.polys) > 0:
+            #print( 'new layer with %d polys' % len(self.polys) )
+            self.layers.append( self.polys[:] )
+            
+            self.polys = []
+
+            if delta > 0.0 and delta < 1.0:
+                if delta in self.thickness.keys():
+                    self.thickness[delta] = self.thickness[delta] + 1
+                else:
+                    self.thickness[delta] = 1
+    
+    ##### moveTo #####
+    def moveTo(self, newPos):
+        if newPos['Z'] != self.pos['Z']:
+            delta = newPos['Z'] - self.pos['Z']
+            self.newLayer(delta)
+        
+        if newPos['E'] <= self.pos['E'] or newPos['E'] <= 0.0:
+            self.newPoly()
+        
+        if newPos['E'] > 0 and newPos['E'] >= self.pos['E']:
+            self.points.append([newPos['X'],
+                            newPos['Y'],
+                            newPos['Z']])
+        
+        # should this be an explicit copy?
+        self.pos = copy.deepcopy(newPos)
+
+
+    ###### parseCoords ######
+    def parseCoords(self, tokens):
+        npos = { }
+        for tok in tokens:
+            axis = tok[0]
+            if axis in ['X', 'Y', 'Z', 'E']:
+                npos[axis] = float(tok[1:])
+        return npos
+    
+    ##### parseCoordsUpdate #####
+    def parseCoordsUpdate(self, tokens):
+        npos = self.parseCoords(tokens)
+        
+        for axis in ['X', 'Y', 'Z', 'E']:
+            if axis not in npos.keys():
+                npos[axis] = self.pos[axis]
+                
+        #print('coord: %8g %8g %8g  %g' % (npos['X'], npos['Y'], npos['Z'], npos['E']))
+        return npos
+                
+
     def N(self, tokens):
         '''line number and checksum'''
         # checksum not implemented
         self.dispatch(tokens[1:])
 
-    def parseCoords(self, tokens):
-        for tok in tokens:
-            axis = tok[0]
-            if axis in ['X', 'Y', 'Z', 'E']:
-                self.pos[axis] = float(tok[1:])
-
     def G0(self, tokens):
         '''move fast'''
-        oldExtrude = self.pos['E']
 
-        self.parseCoords(tokens)
-        if self.pos['E'] <= oldExtrude:
-            self.genLayer()
-
-        self.points.append([self.pos['X'], self.pos['Y'], self.pos['Z']])
-
+        newPos = self.parseCoordsUpdate(tokens)
+        self.moveTo(newPos)
+        
 
     def G1(self, tokens):
         '''move to'''
@@ -186,10 +281,17 @@ class IMPORT_OT_gcode(bpy.types.Operator):
 
     def G28(self, tokens):
         '''move to origin'''
-        self.pos['X'] = 0.0
-        self.pos['Y'] = 0.0
-        self.pos['Z'] = 0.0
-        pass
+        
+        npos = self.pos
+        for tok in tokens:
+           axis = tok[0]
+           if axis in ['X', 'Y', 'Z', 'E']:
+               # note that value is ignored
+               npos[axis] = 0.0
+
+        # no matter what we won't be extruding
+        npos['E'] = 0.0
+        self.moveTo(npos)
 
     def G90(self, tokens):
         '''set absolute positioning'''
@@ -197,11 +299,15 @@ class IMPORT_OT_gcode(bpy.types.Operator):
 
     def G92(self, tokens):
         '''set position'''
-        oldExtrude = self.pos['E']
+        # fortunately Slic3r does not set arbitrary coordinates
+        # or do relative positioning.  This is used just to zero
+        # out the position on the extruder.
 
-        self.parseCoords(tokens)
-        if self.pos['E'] < oldExtrude:
-                self.genLayer()
+        newPos = self.parseCoordsUpdate(tokens)
+        if newPos['E'] == 0:
+            self.newPoly()
+
+        self.pos = newPos
 
     def M82(self, tokens):
         '''set extruder absolute mode'''
@@ -226,6 +332,7 @@ class IMPORT_OT_gcode(bpy.types.Operator):
     def M109(self,tokens):
         '''set extruder temperature and wait'''
         pass
+
 
 
 
