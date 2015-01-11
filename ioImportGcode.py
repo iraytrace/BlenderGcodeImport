@@ -37,7 +37,11 @@ bl_info = {
     'category': 'Import-Export'}
 
 __version__ = '.'.join([str(s) for s in bl_info['version']])
-
+def vcross(b, c):
+    a = (b[1] * c[2] - b[3] * c[1],
+         b[2] * c[0] - b[0] * c[2],
+         b[0] * c[1] - b[1] * c[0])
+    return a
 
 class OldParser():
     '''Imports Reprap FDM gcode'''
@@ -119,7 +123,18 @@ class OldParser():
         f.close()
         self.newLayer()
         print('-------------- done -------------')
-        #for layerNum,layer in enumerate(self.layers):
+        for layerNum,layer in enumerate(self.layers):
+            print ('layer %d' % layerNum)
+
+            polyNum = 1
+            for poly in layer:
+                print('  polyNum %d' % polyNum)
+                polyNum = polyNum + 1
+
+                pointNum = 0
+                for point in poly:
+                    print('    %s' % str(point))
+
         print('-------------- done -------------')
 
     def build(self):
@@ -365,5 +380,5 @@ class OldParser():
 
 if __name__ == "__main__":
     parser = OldParser()
-    parser.parse("C:/Users/Ben/Desktop/cube.gcode")
+    parser.parse("cube_short.gcode")
 
