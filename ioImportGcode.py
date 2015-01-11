@@ -173,7 +173,6 @@ class OldParser():
                     else:
                         polyline = curveData.splines.new('POLY')
                         polyline.points.add(1)
-
                         x,y,z = point
                         newPt = mathutils.Vector((x, y, z, 1))
                         polyline.points[0].co = oldPt
