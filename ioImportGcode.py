@@ -38,7 +38,6 @@ bl_info = {
 
 __version__ = '.'.join([str(s) for s in bl_info['version']])
 
-
 class IMPORT_OT_gcode(bpy.types.Operator):
     '''Imports Reprap FDM gcode'''
     bl_idname = "import_scene.gocde"
